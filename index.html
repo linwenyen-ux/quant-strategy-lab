@@ -255,7 +255,7 @@ svg{display:block;max-width:100%}
   /* 膠囊原本是 flex 子項會被壓縮，6 顆擠在 375px 會變直書；改成整列橫向捲動 */
   .chips{overflow-x:auto;overscroll-behavior-x:contain;scrollbar-width:none;padding-bottom:2px}
   .chips::-webkit-scrollbar{display:none}
-  .chip{flex:0 0 auto;white-space:nowrap;min-height:38px;display:inline-flex;align-items:center}
+  .chip{flex:0 0 auto;white-space:nowrap;min-height:44px;display:inline-flex;align-items:center}
   .ctrl{padding:12px 14px 14px;gap:10px 12px;align-items:end}
   .ctrl .fld{flex:1 1 calc(50% - 6px);min-width:0}
   .ctrl .fld input:not([type=checkbox]),.ctrl .fld select,.ctrl .seg,.ctrl .chk{width:100%}
@@ -2400,9 +2400,11 @@ function renderBatch() {
   P2.innerHTML = `<div class="card">
     <div class="ph"><h2>多股批次回測</h2><span class="dim" style="font-size:12px">· 同一組 30 支策略跑多檔${MK.label}標的</span><div class="sp"></div>
       <input id="bSyms" value="${esc(BATCH.syms || MK.batch)}" spellcheck="false" style="width:300px;background:var(--panel2);border:1px solid var(--line2);color:var(--tx);border-radius:9px;padding:8px 11px;font-size:13px">
+      <span id="bCount" style="font-size:12px;color:var(--mut)"></span>
       <button class="btn primary" id="bRun">▶ 批次執行</button></div>
-    <div id="bOut" style="padding:0 18px 18px">${BATCH.rows ? batchTable() : `<div class="empty">輸入${MK.label}代號（逗號分隔，最多 10 檔），每檔會抓取與目前相同的回測期間</div>`}</div></div>`;
+    <div id="bOut" style="padding:0 18px 18px">${BATCH.rows ? symNotice(BATCH.parsed) + batchTable() : `<div class="empty">輸入${MK.label}代號（逗號分隔，最多 10 檔），每檔會抓取與目前相同的回測期間</div>`}</div></div>`;
   $('#bRun').onclick = runBatch;
+  wireSymCount('bSyms', 'bCount', BATCH_MAX, 'bRun');
 }
 function batchTable() {
   const rows = BATCH.rows;
@@ -2419,8 +2421,9 @@ function batchTable() {
 async function runBatch() {
   if (BATCH.running) return; BATCH.running = true;
   BATCH.syms = $('#bSyms').value;
-  let syms = BATCH.syms.split(/[,，\s]+/).filter(Boolean).slice(0, 10);
-  if (MK.key === 'US') syms = syms.map(x => x.toUpperCase());
+  const bParsed = parseSyms(BATCH.syms, BATCH_MAX, MK.key === 'US');
+  BATCH.parsed = bParsed;
+  const syms = bParsed.syms;
   const yrs = +$('#period').value, out = [];
   $('#bOut').innerHTML = `<div class="empty"><span class="spin"></span> 批次執行中…</div>`;
   const bench = await fetchBars(CFG.bench, yrs).catch(() => null);
@@ -2447,13 +2450,49 @@ async function runBatch() {
    ========================================================================= */
 let SIG = { syms: null, rows: null, running: false, filter: '動作', asOf: '' };
 
+const SIG_MAX = 20, BATCH_MAX = 10;
+
+/* 解析代號清單。原本直接 .slice() 會無聲吃掉超出的代號，
+   使用者以為全掃了、其實沒有。改成把「重複」與「超出」都回報出來。 */
+function parseSyms(raw, max, upper) {
+  const all = raw.split(/[,，\s]+/).filter(Boolean).map(x => upper ? x.toUpperCase() : x);
+  const seen = new Set(), uniq = [], dup = [];
+  for (const x of all) { if (seen.has(x)) dup.push(x); else { seen.add(x); uniq.push(x); } }
+  return { syms: uniq.slice(0, max), dropped: uniq.slice(max), dup, max };
+}
+
+/* 輸入框旁的即時計數：還沒按掃描就看得到會不會超限 */
+function wireSymCount(inputId, outId, max, btnId) {
+  const i = $('#' + inputId), o = $('#' + outId); if (!i || !o) return;
+  const upd = () => {
+    const p = parseSyms(i.value, max, MK.key === 'US');
+    const n = p.syms.length + p.dropped.length;
+    const over = p.dropped.length, dup = p.dup.length;
+    o.innerHTML = !n ? ''
+      : `<b style="color:${over ? 'var(--up)' : 'var(--mut)'}">${p.syms.length}</b>/${max} 檔`
+        + (over ? `<span style="color:var(--up)"> · 超出 ${over} 檔不會掃描</span>` : '')
+        + (dup ? `<span class="dim"> · ${dup} 個重複已略過</span>` : '');
+    const b = btnId && $('#' + btnId); if (b) b.disabled = !p.syms.length;
+  };
+  i.addEventListener('input', upd); upd();
+}
+
+function symNotice(p) {
+  if (!p || (!p.dropped.length && !p.dup.length)) return '';
+  const bits = [];
+  if (p.dropped.length) bits.push(`一次最多 <b>${p.max}</b> 檔，<b>已略過後面 ${p.dropped.length} 檔</b>：${p.dropped.map(esc).join('、')}`);
+  if (p.dup.length) bits.push(`已自動去除 ${p.dup.length} 個重複代號：${[...new Set(p.dup)].map(esc).join('、')}`);
+  return `<div class="warn" style="margin:0 0 12px;border-left-color:var(--up)">⚠ ${bits.join('<br>')}</div>`;
+}
+
 async function runSignals() {
   if (SIG.running) return;
   SIG.running = true;
   SIG.syms = $('#sigSyms').value;
   try { localStorage.setItem('qlab.watch', SIG.syms); } catch (e) { }
-  let syms = SIG.syms.split(/[,，\s]+/).filter(Boolean).slice(0, 20);
-  if (MK.key === 'US') syms = syms.map(x => x.toUpperCase());
+  const parsed = parseSyms(SIG.syms, SIG_MAX, MK.key === 'US');
+  SIG.parsed = parsed;
+  const syms = parsed.syms;
   const yrs = +$('#period').value, out = [];
   const bench = await fetchBars(CFG.bench, yrs).catch(() => null);
   for (let i = 0; i < syms.length; i++) {
@@ -2509,6 +2548,7 @@ function renderSignals() {
       持有中 <b style="color:var(--gold)">${cnt('持有中')}</b>、被濾網擋下 <b>${cnt('被濾網擋下')}</b>。
       這些動作要在<b>下一個交易日開盤</b>執行。
       ${errs.length ? `<br><span class="up">${errs.length} 檔載入失敗：${errs.map(e => esc(e.sym)).join('、')}</span>` : ''}</div>
+    ${symNotice(SIG.parsed)}
     <div class="tblwrap" style="max-height:520px"><table><thead><tr>
       <th>動作</th><th>標的</th><th>收盤</th><th>漲跌</th><th>策略</th><th>類別</th><th>持有根數</th><th>未實現</th><th>該策略夏普</th><th>交易數</th></tr></thead>
       <tbody>${rows.length ? rows.map(r => `<tr>
@@ -2523,8 +2563,9 @@ function renderSignals() {
   }
   P2.innerHTML = `<div class="card">
     <div class="ph"><h2>今日訊號</h2><span class="dim" style="font-size:12px">· 自選股 × ${STRATS.length} 支策略</span><div class="sp"></div>
-      <input id="sigSyms" value="${esc(SIG.syms)}" spellcheck="false" placeholder="代號，逗號分隔，最多 20 檔"
+      <input id="sigSyms" value="${esc(SIG.syms)}" spellcheck="false" placeholder="代號，逗號分隔，最多 ${SIG_MAX} 檔"
         style="width:300px;background:var(--panel2);border:1px solid var(--line2);color:var(--tx);border-radius:9px;padding:8px 11px;font-size:13px">
+      <span id="sigCount" style="font-size:12px;color:var(--mut)"></span>
       <button class="btn primary" id="sigRun">▶ 掃描</button>
       ${SIG.rows ? '<button class="btn" id="sigCsv">⬇ CSV</button>' : ''}</div>
     ${SIG.rows ? `<div class="ph" style="padding-top:0"><div class="chips">
@@ -2541,6 +2582,7 @@ function renderSignals() {
         <b>③ 被濾網擋下</b>代表策略本身有進場訊號，但被大盤濾網或漲跌停規則擋掉了。想看原始訊號請到回測設定把濾網關掉。
       </div></div>`;
   $('#sigRun').onclick = runSignals;
+  wireSymCount('sigSyms', 'sigCount', SIG_MAX, 'sigRun');
   if ($('#sigCsv')) $('#sigCsv').onclick = () => {
     const head = ['動作', '標的', '名稱', '收盤', '漲跌%', '策略', '類別', '持有根數', '未實現%', '策略夏普', '交易數'];
     const csv = '\ufeff' + [`# ${MK.label} 今日訊號 資料截至 ${SIG.asOf}`, head.join(','),
@@ -2985,14 +3027,19 @@ function runSelfTest() {
   const T = [];
   const EPS = 1e-9;
   const near = (a, b, tol) => !isNA(a) && !isNA(b) && Math.abs(a - b) <= (tol === undefined ? 1e-9 : tol);
-  const arrNear = (got, want, tol) => got.length === want.length && want.every((w, i) =>
-    (isNA(w) && isNA(got[i])) || near(got[i], w, tol));
-  const fmt = a => '[' + a.map(v => isNA(v) ? 'na' : (Math.round(v * 1e6) / 1e6)).join(', ') + ']';
+  // 字串與布林用嚴格相等；只有數字才走容差比較（否則字串會被當成 NaN 而永遠不相等）
+  const eq = (a, b, tol) => (typeof b === 'string' || typeof b === 'boolean') ? a === b : near(a, b, tol);
+  const arrNear = (got, want, tol) => Array.isArray(got) && got.length === want.length
+    && want.every((w, i) => (isNA(w) && isNA(got[i])) || eq(got[i], w, tol));
+  const one = v => typeof v === 'string' ? JSON.stringify(v)
+    : typeof v === 'boolean' ? String(v)
+    : isNA(v) ? 'na' : String(Math.round(v * 1e6) / 1e6);
+  const fmt = a => '[' + a.map(one).join(', ') + ']';
   const t = (group, name, got, want, tol) => {
-    const pass = Array.isArray(want) ? arrNear(got, want, tol)
-      : (typeof want === 'boolean' ? got === want : near(got, want, tol));
-    T.push({ group, name, pass, got: Array.isArray(got) ? fmt(got) : (isNA(got) ? 'na' : String(Math.round(got * 1e6) / 1e6)),
-      want: Array.isArray(want) ? fmt(want) : String(want) });
+    const pass = Array.isArray(want) ? arrNear(got, want, tol) : eq(got, want, tol);
+    T.push({ group, name, pass,
+      got: Array.isArray(got) ? fmt(got) : one(got),
+      want: Array.isArray(want) ? fmt(want) : one(want) });
   };
 
   /* ── 移動平均 ── */
@@ -3094,6 +3141,23 @@ function runSelfTest() {
   t('回測引擎', '零成本時總報酬 = 收盤/次根開盤−1', r1.eq[n - 1] / CFG.cap - 1, 129 / 101 - 1, 1e-9);
   t('回測引擎', '訊號後次根成交（進場價）', r1.trades[0].p0, 101, 1e-9);
   t('回測引擎', '期末未平倉標記', r1.trades[0].openPos, true);
+
+  /* ── 代號解析（防止無聲截斷）── */
+  const ps1 = parseSyms('2330,2454,2317', 20, false);
+  t('代號解析', '逗號分隔', ps1.syms, ['2330', '2454', '2317']);
+  t('代號解析', '全形逗號與空白混用',
+    parseSyms('2330，2454 2317,  3008', 20, false).syms, ['2330', '2454', '2317', '3008']);
+  const ps2 = parseSyms(Array.from({ length: 25 }, (_, i) => 'S' + i).join(','), 20, false);
+  t('代號解析', '超過上限只取前 20 檔', ps2.syms.length, 20);
+  t('代號解析', '超出的 5 檔有被回報（不是無聲吃掉）', ps2.dropped.length, 5);
+  t('代號解析', '回報的是正確的代號', ps2.dropped[0], 'S20');
+  const ps3 = parseSyms('2330,2454,2330,2317,2454', 20, false);
+  t('代號解析', '重複代號被去除', ps3.syms, ['2330', '2454', '2317']);
+  t('代號解析', '重複的有被回報', ps3.dup.length, 2);
+  t('代號解析', '美股轉大寫', parseSyms('aapl,msft', 20, true).syms, ['AAPL', 'MSFT']);
+  t('代號解析', '空字串不產生空代號', parseSyms('  ,, ,  ', 20, false).syms.length, 0);
+  t('代號解析', '沒超限時不產生警告', symNotice(ps1), '');
+  t('代號解析', '超限時有警告', symNotice(ps2).includes('已略過後面 5 檔'), true);
 
   /* ── 熱身期防護 ── */
   const needy = { id: '__need', name: 'test', cat: '其他', params: {}, entry: '', exit: '',
