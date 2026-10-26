@@ -2398,8 +2398,8 @@ let BATCH = { rows: null, running: false, syms: null };
 function renderBatch() {
   const P2 = $('#p-batch');
   P2.innerHTML = `<div class="card">
-    <div class="ph"><h2>多股批次回測</h2><span class="dim" style="font-size:12px">· 同一組 30 支策略跑多檔${MK.label}標的</span><div class="sp"></div>
-      <input id="bSyms" value="${esc(BATCH.syms || MK.batch)}" spellcheck="false" style="width:300px;background:var(--panel2);border:1px solid var(--line2);color:var(--tx);border-radius:9px;padding:8px 11px;font-size:13px">
+    <div class="ph"><h2>多股批次回測</h2><span class="dim" style="font-size:12px">· ${STRATS.length} 支策略 × 多檔${MK.label}標的 · 預設帶入今日訊號的自選股（最多 ${BATCH_MAX} 檔）</span><div class="sp"></div>
+      <input id="bSyms" value="${esc(BATCH.syms || loadWatch(MK.key) || MK.batch)}" spellcheck="false" style="width:300px;background:var(--panel2);border:1px solid var(--line2);color:var(--tx);border-radius:9px;padding:8px 11px;font-size:13px">
       <span id="bCount" style="font-size:12px;color:var(--mut)"></span>
       <button class="btn primary" id="bRun">▶ 批次執行</button></div>
     <div id="bOut" style="padding:0 18px 18px">${BATCH.rows ? symNotice(BATCH.parsed) + batchTable() : `<div class="empty">輸入${MK.label}代號（逗號分隔，最多 10 檔），每檔會抓取與目前相同的回測期間</div>`}</div></div>`;
@@ -2452,6 +2452,24 @@ let SIG = { syms: null, rows: null, running: false, filter: '動作', asOf: '' }
 
 const SIG_MAX = 20, BATCH_MAX = 10;
 
+/* 自選股清單：每個市場各存一份。
+   舊版用單一 key 'qlab.watch'，而且因為 applyMarket 會搶先覆寫 SIG.syms，
+   那個值其實從來沒被讀回來過——等於存了也白存。這裡一併修掉。 */
+const WATCH_KEY = k => 'qlab.watch.' + k;
+function loadWatch(k) { try { return localStorage.getItem(WATCH_KEY(k)) || ''; } catch (e) { return ''; } }
+function saveWatch(k, v) { try { localStorage.setItem(WATCH_KEY(k), v); return true; } catch (e) { return false; } }
+function clearWatch(k) { try { localStorage.removeItem(WATCH_KEY(k)); } catch (e) { } }
+/* 舊 key 遷移：qlab.market 記得當時是哪個市場，照那個市場歸位，只做一次 */
+(function migrateWatch() {
+  try {
+    const old = localStorage.getItem('qlab.watch');
+    if (!old) return;
+    const mk = localStorage.getItem('qlab.market') || 'TW';
+    if (!localStorage.getItem(WATCH_KEY(mk))) localStorage.setItem(WATCH_KEY(mk), old);
+    localStorage.removeItem('qlab.watch');
+  } catch (e) { }
+})();
+
 /* 解析代號清單。原本直接 .slice() 會無聲吃掉超出的代號，
    使用者以為全掃了、其實沒有。改成把「重複」與「超出」都回報出來。 */
 function parseSyms(raw, max, upper) {
@@ -2477,6 +2495,18 @@ function wireSymCount(inputId, outId, max, btnId) {
   i.addEventListener('input', upd); upd();
 }
 
+/* 儲存／重設的即時回饋，不用彈 alert 打斷操作 */
+function toastSig(msg, bad) {
+  const host = $('#sigCount'); if (!host) return;
+  const old = host.innerHTML;
+  host.innerHTML = `<span style="color:${bad ? 'var(--up)' : 'var(--teal)'}">${bad ? '✗' : '✓'} ${esc(msg)}</span>`;
+  clearTimeout(toastSig._t);
+  toastSig._t = setTimeout(() => {
+    const i = $('#sigSyms');
+    if (i) i.dispatchEvent(new Event('input', { bubbles: true })); else host.innerHTML = old;
+  }, 2600);
+}
+
 function symNotice(p) {
   if (!p || (!p.dropped.length && !p.dup.length)) return '';
   const bits = [];
@@ -2489,7 +2519,7 @@ async function runSignals() {
   if (SIG.running) return;
   SIG.running = true;
   SIG.syms = $('#sigSyms').value;
-  try { localStorage.setItem('qlab.watch', SIG.syms); } catch (e) { }
+  saveWatch(MK.key, SIG.syms);
   const parsed = parseSyms(SIG.syms, SIG_MAX, MK.key === 'US');
   SIG.parsed = parsed;
   const syms = parsed.syms;
@@ -2527,7 +2557,7 @@ async function runSignals() {
 
 function renderSignals() {
   const P2 = $('#p-sig');
-  if (!SIG.syms) { try { SIG.syms = localStorage.getItem('qlab.watch') || MK.batch; } catch (e) { SIG.syms = MK.batch; } }
+  if (!SIG.syms) SIG.syms = loadWatch(MK.key) || MK.batch;
   const COLORS = { '買進': 'var(--up)', '賣出': 'var(--dn)', '持有中': 'var(--gold)', '被濾網擋下': 'var(--mut)', '空手': 'var(--dim)' };
   let body;
   if (!SIG.rows) {
@@ -2562,10 +2592,12 @@ function renderSignals() {
       </tbody></table></div>`;
   }
   P2.innerHTML = `<div class="card">
-    <div class="ph"><h2>今日訊號</h2><span class="dim" style="font-size:12px">· 自選股 × ${STRATS.length} 支策略</span><div class="sp"></div>
+    <div class="ph"><h2>今日訊號</h2><span class="dim" style="font-size:12px">· ${MK.label}自選股 × ${STRATS.length} 支策略</span><div class="sp"></div>
       <input id="sigSyms" value="${esc(SIG.syms)}" spellcheck="false" placeholder="代號，逗號分隔，最多 ${SIG_MAX} 檔"
         style="width:300px;background:var(--panel2);border:1px solid var(--line2);color:var(--tx);border-radius:9px;padding:8px 11px;font-size:13px">
       <span id="sigCount" style="font-size:12px;color:var(--mut)"></span>
+      <button class="btn" id="sigSave" title="把目前清單存成${MK.label}的自選股，下次開啟自動帶入">💾 儲存</button>
+      <button class="btn" id="sigReset" title="清掉已儲存的${MK.label}清單，回到內建預設">↺ 預設</button>
       <button class="btn primary" id="sigRun">▶ 掃描</button>
       ${SIG.rows ? '<button class="btn" id="sigCsv">⬇ CSV</button>' : ''}</div>
     ${SIG.rows ? `<div class="ph" style="padding-top:0"><div class="chips">
@@ -2582,6 +2614,21 @@ function renderSignals() {
         <b>③ 被濾網擋下</b>代表策略本身有進場訊號，但被大盤濾網或漲跌停規則擋掉了。想看原始訊號請到回測設定把濾網關掉。
       </div></div>`;
   $('#sigRun').onclick = runSignals;
+  $('#sigSave').onclick = () => {
+    const v = $('#sigSyms').value.trim();
+    if (!v) { toastSig('清單是空的，沒有東西可存', true); return; }
+    SIG.syms = v;
+    const p = parseSyms(v, SIG_MAX, MK.key === 'US');
+    const ok = saveWatch(MK.key, v);                 // 只寫一次
+    toastSig(ok ? `已存為${MK.label}自選股（${p.syms.length} 檔）`
+                : '儲存失敗：瀏覽器儲存空間可能已滿', !ok);
+  };
+  $('#sigReset').onclick = () => {
+    clearWatch(MK.key);
+    SIG.syms = MK.batch;
+    renderSignals();
+    toastSig(`已回到${MK.label}內建預設`);
+  };
   wireSymCount('sigSyms', 'sigCount', SIG_MAX, 'sigRun');
   if ($('#sigCsv')) $('#sigCsv').onclick = () => {
     const head = ['動作', '標的', '名稱', '收盤', '漲跌%', '策略', '類別', '持有根數', '未實現%', '策略夏普', '交易數'];
@@ -3158,6 +3205,47 @@ function runSelfTest() {
   t('代號解析', '空字串不產生空代號', parseSyms('  ,, ,  ', 20, false).syms.length, 0);
   t('代號解析', '沒超限時不產生警告', symNotice(ps1), '');
   t('代號解析', '超限時有警告', symNotice(ps2).includes('已略過後面 5 檔'), true);
+
+  /* ── 自選股清單（每市場一份）── */
+  (function () {
+    const bk = { TW: loadWatch('TW'), US: loadWatch('US') };     // 先備份使用者的真實清單
+    clearWatch('TW'); clearWatch('US');
+    t('自選股', '沒存過時回空字串', loadWatch('TW'), '');
+    saveWatch('TW', '1101,1102');
+    saveWatch('US', 'AAPL,TSLA');
+    t('自選股', '台股清單存得回來', loadWatch('TW'), '1101,1102');
+    t('自選股', '美股清單存得回來', loadWatch('US'), 'AAPL,TSLA');
+    t('自選股', '兩個市場互不覆蓋', loadWatch('TW') !== loadWatch('US'), true);
+    clearWatch('TW');
+    t('自選股', '重設只清掉該市場', loadWatch('TW') === '' && loadWatch('US') === 'AAPL,TSLA', true);
+    clearWatch('US');
+    // 還原使用者原本的清單，別被檢測清掉
+    if (bk.TW) saveWatch('TW', bk.TW);
+    if (bk.US) saveWatch('US', bk.US);
+    t('自選股', '檢測後使用者清單未受影響', loadWatch('TW'), bk.TW || '');
+  })();
+
+  /* ── 批次沿用自選股 ── */
+  (function () {
+    const bk = { TW: loadWatch('TW'), mk: MK.key, sig: SIG.syms, bat: BATCH.syms };
+    saveWatch('TW', '1101,1102,2609');
+    applyMarket('TW', false);
+    t('批次清單', '批次沿用今日訊號的自選股', BATCH.syms, '1101,1102,2609');
+    t('批次清單', '兩者指向同一份清單', BATCH.syms === SIG.syms, true);
+    clearWatch('TW');
+    applyMarket('TW', false);
+    t('批次清單', '沒存過時回到內建預設', BATCH.syms, MARKETS.TW.batch);
+    // 批次上限比今日訊號低，超出要被回報而不是無聲吃掉
+    const many = Array.from({ length: 14 }, (_, i) => 'T' + i).join(',');
+    const bp = parseSyms(many, BATCH_MAX, false);
+    t('批次清單', `上限 ${BATCH_MAX} 檔`, bp.syms.length, BATCH_MAX);
+    t('批次清單', '超出的 4 檔有被回報', bp.dropped.length, 4);
+    // 還原
+    if (bk.TW) saveWatch('TW', bk.TW); else clearWatch('TW');
+    applyMarket(bk.mk, false);
+    SIG.syms = bk.sig; BATCH.syms = bk.bat;
+    t('批次清單', '檢測後市場與清單已還原', MK.key, bk.mk);
+  })();
 
   /* ── 熱身期防護 ── */
   const needy = { id: '__need', name: 'test', cat: '其他', params: {}, entry: '', exit: '',
@@ -3970,7 +4058,10 @@ function applyMarket(key, reload) {
   const si = $('#sym'); si.value = MK.defSym; si.placeholder = MK.hint;
   $('#adjFld').hidden = !MK.adj;
   $('#adjChk').checked = CFG.adj;
-  BATCH.rows = null; BATCH.syms = MK.batch; SIG.syms = MK.batch; SIG.rows = null; OPT.grid = null; MC.rows = null; MC.sel = null; MC.dist = {}; COST.rows = null; COST.summary = null; PORT.res = null; PORT.sel = null; WF.res = null; SIG.rows = null; SEQ.res = null;
+  BATCH.rows = null; BATCH.parsed = null;
+  SIG.syms = loadWatch(MK.key) || MK.batch; SIG.rows = null; SIG.parsed = null;
+  BATCH.syms = SIG.syms;                      // 批次沿用自選股，不另存一份
+  OPT.grid = null; MC.rows = null; MC.sel = null; MC.dist = {}; COST.rows = null; COST.summary = null; PORT.res = null; PORT.sel = null; WF.res = null; SEQ.res = null;
   try { localStorage.setItem('qlab.market', MK.key); } catch (e) { }
   if (reload) load('api');
 }
