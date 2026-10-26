@@ -116,6 +116,10 @@ h1,h2,h3{margin:0;font-weight:650;letter-spacing:-.01em}
 .kpi .v.sm{font-size:21px;font-family:inherit;letter-spacing:0;line-height:1.3;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
 .kpi .f{font-size:11.5px;color:var(--dim);line-height:1.5;margin-top:auto;overflow:hidden;text-overflow:ellipsis;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical}
 
+.lowq td{opacity:.42}
+.lowq:hover td{opacity:.78}
+.flaw{display:inline-block;margin-left:7px;padding:1px 7px;border-radius:999px;font-size:10.5px;
+  color:var(--up);background:rgba(255,95,86,.12);border:1px solid rgba(255,95,86,.3);white-space:nowrap;cursor:help}
 .tiptip{position:fixed;z-index:9999;max-width:min(78vw,340px);padding:9px 12px;border-radius:10px;
   background:var(--panel2);border:1px solid var(--line2);color:var(--tx);font-size:12.5px;line-height:1.6;
   box-shadow:0 8px 26px rgba(0,0,0,.34);white-space:pre-wrap;opacity:0;pointer-events:none;
@@ -2448,7 +2452,7 @@ async function runBatch() {
    今日訊號：自選股清單 × 全部策略，列出最新交易日的動作
    訊號在收盤後產生、次一個交易日開盤才成交，所以這裡列的是「明天要做什麼」。
    ========================================================================= */
-let SIG = { syms: null, rows: null, running: false, filter: '動作', asOf: '' };
+let SIG = { syms: null, rows: null, running: false, filter: '動作', asOf: '', hideLow: false };
 
 const SIG_MAX = 20, BATCH_MAX = 10;
 
@@ -2547,12 +2551,23 @@ async function runSignals() {
         const sn = r.signalNow; if (!sn) return;
         out.push({ sym: syms[i], name: NAMES[MK.key + ':' + syms[i]] || '', close: last, chg: prev ? last / prev - 1 : NA,
           strat: r.name, cat: r.cat, action: sn.blockedNow && sn.action === '空手' ? '被濾網擋下' : sn.action,
-          bars: sn.bars, unreal: sn.unreal, sharpe: r.sharpe, nT: r.nT });
+          bars: sn.bars, unreal: sn.unreal, sharpe: r.sharpe, oos: r.oos, nT: r.nT });
       });
       fetchName(syms[i]).catch(() => '');
     } catch (e) { out.push({ sym: syms[i], err: '載入失敗：' + (e.message || e) }); }
   }
   SIG.rows = out; SIG.running = false; renderSignals();
+}
+
+/* 訊號品質：只判定「明顯不可信」，回傳具體理由。
+   刻意不做正面評分——本平台經 BH 多重比較校正後 0 支策略通過，
+   沒有任何訊號稱得上「可信」，只有「明顯不可信」與「尚未被證明不可信」。 */
+function sigFlaws(r) {
+  const f = [];
+  if (!isNA(r.nT) && r.nT < 5) f.push(`僅 ${r.nT} 筆交易`);
+  if (!isNA(r.sharpe) && r.sharpe < 0) f.push(`回測夏普 ${nf(r.sharpe)}`);
+  if (!isNA(r.oos) && r.oos < 0) f.push(`樣本外夏普 ${nf(r.oos)}`);
+  return f;
 }
 
 function renderSignals() {
@@ -2571,6 +2586,9 @@ function renderSignals() {
     else if (SIG.filter !== '全部') rows = rows.filter(r => r.action === SIG.filter);
     rows.sort((a, b) => { const o = { '買進': 0, '賣出': 1, '持有中': 2, '被濾網擋下': 3, '空手': 4 };
       return (o[a.action] - o[b.action]) || ((isNA(b.sharpe) ? -9 : b.sharpe) - (isNA(a.sharpe) ? -9 : a.sharpe)); });
+    rows.forEach(r => { r._flaws = sigFlaws(r); });
+    const lowAll = SIG.rows.filter(r => !r.err && sigFlaws(r).length).length;
+    if (SIG.hideLow) rows = rows.filter(r => !r._flaws.length);
     const cnt = k => SIG.rows.filter(r => !r.err && r.action === k).length;
     body = `
     <div class="warn" style="margin:0 0 12px">資料截至 <b>${SIG.asOf ? dsp(SIG.asOf) : '—'}</b>（收盤後）：
@@ -2579,13 +2597,19 @@ function renderSignals() {
       這些動作要在<b>下一個交易日開盤</b>執行。
       ${errs.length ? `<br><span class="up">${errs.length} 檔載入失敗：${errs.map(e => esc(e.sym)).join('、')}</span>` : ''}</div>
     ${symNotice(SIG.parsed)}
+    ${lowAll ? `<div class="warn" style="margin:0 0 12px;border-left-color:var(--mut)">
+      其中 <b>${lowAll}</b> 筆被標為<b>明顯不可信</b>（交易數 &lt; 5、回測夏普為負、或樣本外夏普為負），已打暗並註明理由。<br>
+      <span class="dim">沒被標記<b>不等於</b>可信——本平台的策略經 Benjamini-Hochberg 多重比較校正後<b>沒有任何一支通過</b>。
+      這裡只濾掉「明顯不該看」的，剩下的仍需自行判斷。</span></div>` : ''}
     <div class="tblwrap" style="max-height:520px"><table><thead><tr>
       <th>動作</th><th>標的</th><th>收盤</th><th>漲跌</th><th>策略</th><th>類別</th><th>持有根數</th><th>未實現</th><th>該策略夏普</th><th>交易數</th></tr></thead>
-      <tbody>${rows.length ? rows.map(r => `<tr>
+      <tbody>${rows.length ? rows.map(r => `<tr class="${r._flaws.length ? 'lowq' : ''}">
         <td data-l="動作" style="color:${COLORS[r.action]};font-weight:600">${r.action}</td>
         <td data-l="標的" style="text-align:left">${esc(r.sym)} <span class="dim">${esc(r.name || '')}</span></td>
         <td data-l="收盤" class="mono">${r.close.toFixed(2)}</td><td data-l="漲跌" class="mono ${cls(r.chg)}">${pc(r.chg, 2)}</td>
-        <td data-l="策略" style="text-align:left">${esc(r.strat)}</td><td data-l="類別"><span class="tag ${r.cat}">${r.cat}</span></td>
+        <td data-l="策略" style="text-align:left">${esc(r.strat)}${r._flaws.length
+          ? `<span class="flaw" title="${esc('這支策略在這檔標的上' + r._flaws.join('、') + '，訊號不值得採信')}">⚠ ${esc(r._flaws[0])}${r._flaws.length > 1 ? ' +' + (r._flaws.length - 1) : ''}</span>`
+          : ''}</td><td data-l="類別"><span class="tag ${r.cat}">${r.cat}</span></td>
         <td data-l="持有根數" class="mono">${r.bars || '—'}</td><td data-l="未實現" class="mono ${cls(r.unreal)}">${isNA(r.unreal) ? '—' : pc(r.unreal, 1)}</td>
         <td data-l="夏普" class="mono dim">${nf(r.sharpe)}</td><td data-l="交易數" class="mono dim">${r.nT}</td></tr>`).join('')
         : `<tr><td colspan="10" class="dim" style="text-align:center;padding:30px">此篩選條件下沒有訊號</td></tr>`}
@@ -2603,6 +2627,8 @@ function renderSignals() {
     ${SIG.rows ? `<div class="ph" style="padding-top:0"><div class="chips">
       ${['動作', '買進', '賣出', '持有中', '被濾網擋下', '全部'].map(c =>
         `<div class="chip ${c === SIG.filter ? 'on' : ''}" data-f="${c}">${c === '動作' ? '只看買賣' : c}</div>`).join('')}
+      <div class="chip ${SIG.hideLow ? 'on' : ''}" id="chipLow"
+        title="隱藏交易數 < 5、回測夏普為負、或樣本外夏普為負的訊號">⚠ 隱藏明顯不可信</div>
     </div></div>` : ''}
     <div id="sigOut" style="padding:0 18px 18px">${body}</div></div>
     <div class="card" style="margin-top:16px"><div class="ph"><h2>怎麼用這一頁</h2></div>
@@ -2638,6 +2664,8 @@ function renderSignals() {
     dl(csv, `signals_${MK.key}_${SIG.asOf}.csv`, 'text/csv');
   };
   P2.querySelectorAll('.chip[data-f]').forEach(c => c.onclick = () => { SIG.filter = c.dataset.f; renderSignals(); });
+  const hl = P2.querySelector('#chipLow');
+  if (hl) hl.onclick = () => { SIG.hideLow = !SIG.hideLow; renderSignals(); };
 }
 
 /* =========================================================================
@@ -3224,6 +3252,24 @@ function runSelfTest() {
     if (bk.US) saveWatch('US', bk.US);
     t('自選股', '檢測後使用者清單未受影響', loadWatch('TW'), bk.TW || '');
   })();
+
+  /* ── 訊號品質判定 ── */
+  t('訊號品質', '交易數 < 5 會被標記',
+    sigFlaws({ nT: 1, sharpe: 2, oos: 1 })[0], '僅 1 筆交易');
+  t('訊號品質', '回測夏普為負會被標記',
+    sigFlaws({ nT: 20, sharpe: -1.84, oos: 1 }).some(x => x.indexOf('回測夏普') === 0), true);
+  t('訊號品質', '樣本外夏普為負會被標記',
+    sigFlaws({ nT: 20, sharpe: 1.5, oos: -0.3 }).some(x => x.indexOf('樣本外夏普') === 0), true);
+  t('訊號品質', '三個問題都有時全部列出',
+    sigFlaws({ nT: 2, sharpe: -0.5, oos: -0.2 }).length, 3);
+  t('訊號品質', '健康的訊號不標記',
+    sigFlaws({ nT: 20, sharpe: 1.5, oos: 0.8 }).length, 0);
+  t('訊號品質', '剛好 5 筆不算樣本不足',
+    sigFlaws({ nT: 5, sharpe: 1, oos: 1 }).length, 0);
+  t('訊號品質', 'na 值不誤判為問題',
+    sigFlaws({ nT: 20, sharpe: NA, oos: NA }).length, 0);
+  t('訊號品質', '夏普剛好 0 不算負',
+    sigFlaws({ nT: 20, sharpe: 0, oos: 0 }).length, 0);
 
   /* ── 批次沿用自選股 ── */
   (function () {
