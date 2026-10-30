@@ -620,7 +620,8 @@ function mtfMap(weekSeries, idx) {                   // 把週線序列攤回日
 
 <script>
 /* =========================================================================
-   策略庫 — 由 github.com/Alorse/pinescript-strategies 移植（MPL-2.0）
+   策略庫 — 由 github.com/Alorse/pinescript-strategies 移植
+   （該 repo 無 LICENSE 檔；43 個 .pine 中僅 9 個標示 MPL-2.0，詳見策略庫分頁）
    每支策略保留原始 .pine 的預設參數與進出場條件。
    台股現股模擬：原腳本的 Short 進場一律停用；若原策略以反向進場代替平倉，
    則把反向訊號視為「出場」（規則說明中會標示）。
@@ -3079,12 +3080,22 @@ function renderLib() {
     <button class="btn" id="btnTest">🧪 自我檢測</button>
     <a class="btn" target="_blank" rel="noopener" style="text-decoration:none" href="https://github.com/Alorse/pinescript-strategies">Alorse/pinescript-strategies ↗</a></div>
     <div style="padding:0 18px 18px" class="rules">
-      30 支策略全部來自 <b>Alorse/pinescript-strategies</b>（MPL-2.0 授權）的 <code>strategies/</code> 目錄，依原始 <code>.pine</code> 檔的<b>預設參數</b>與進出場條件逐條移植為 JavaScript，指標實作遵循 Pine 的 <code>ta.*</code> 語意（含 na 暖機期，長度不足時不產生訊號）。<br><br>
+      30 支策略全部來自 <b>Alorse/pinescript-strategies</b> 的 <code>strategies/</code> 目錄，依原始 <code>.pine</code> 檔的<b>預設參數</b>與進出場條件逐條移植為 JavaScript，指標實作遵循 Pine 的 <code>ta.*</code> 語意（含 na 暖機期，長度不足時不產生訊號）。<br>
+      <span class="up"><b>授權狀態：</b></span>該 repo <b>沒有 LICENSE 檔</b>。實際逐檔檢查 <code>strategies/</code> 下的 43 個 <code>.pine</code>，
+      只有 <b>9 個</b>在檔頭標示 Mozilla Public License 2.0，其餘 <b>34 個未標示任何授權</b>（未標示者在著作權法上預設為保留所有權利）。
+      檔名也顯示部分並非 Alorse 本人所作（如 <code>[kodify]</code>、<code>[Bunghole]</code>、<code>[Lupown]</code>、<code>YT-Trade Pro</code>），該 repo 為收集彙整。
+      <b>本工具僅供個人研究使用；若要用於商業用途，須先向各原作者釐清授權。</b><br><br>
       <b>三項必須知道的調整：</b><br>
       1. <b>只做多。</b>原腳本的 Short 進場一律停用；若原策略是用「反向進場」來平倉（如 2 SMA + RSI），則把反向訊號當成出場。台股現股本來就無法放空；<b>美股雖然可以放空，本平台仍維持只做多</b>，因此空頭段的表現無法從這裡得知。<br>
       2. <b>多週期（MTF）改用週線。</b>原腳本的 15 分 / 120 分 MTF 在日線資料上不存在，改取「已完成的週 K」，不前視。受影響：Double RSI、RSI + 1200。<br>
       3. <b>參數原封不動。</b>多數策略是為加密貨幣小時線設計的，套到日線時有些長度（EMA 600 / SMA 350 / Aroon 288 / EMA 2500）在短期資料上根本算不出來。這類策略在排行榜會單獨標成「<b>資料不足</b>」並列出所需根數，<b>不會</b>混進「沒有交易」——兩者意義不同：資料不足是沒跑成，沒有交易是跑了但沒觸發訊號。要讓它們動起來請到「參數最佳化」分頁調小週期，或把回測期間拉長到 3～5 年。<br><br>
       <b>台股與美股的差異：</b>兩個市場現在都支援<b>還原權息</b>（控制列的核取方塊，預設開啟），但做法不同——美股直接用 FinMind 提供的 <code>Adj_Close</code>；台股的免費方案沒有還原序列，改由 <code>TaiwanStockDividendResult</code>（除權息）與 <code>TaiwanStockSplitPrice</code>（面額變更／分割）的參考價（<code>after_price ÷ before_price</code>）往回連乘自建；<b>減資</b>的資料集需付費方案，目前未處理。成本預設也不同：台股手續費 0.1425% 雙邊＋證交稅 0.3%，美股則是零佣金＋極小的規費。
+      <br><br>
+      <span class="up"><b>資料來源的使用限制：</b></span>行情與籌碼資料全部來自 <b>FinMind</b> 開放 API（免 token，約 300 次／小時）。
+      FinMind 的專案說明載明資料<b>僅供教育與非商業用途</b>，且資料僅供參考、使用者需自行承擔交易損失。
+      （註：其 repo 的 LICENSE 檔為 Apache 2.0，但那涵蓋的是其 Python 套件原始碼，與 API 資料服務的使用條件是兩回事；
+      若要用於商業用途，應直接向 FinMind 確認。）<br><br>
+      <b>本工具為研究用途，所有數字均為歷史回測結果，不構成投資建議，也不保證未來表現。</b>
     </div></div>
   ${Object.entries(g).map(([k, arr]) => `<div class="card" style="margin-bottom:16px">
     <div class="ph"><h2>${k}</h2><span class="dim" style="font-size:12px">${arr.length} 支</span></div>
@@ -3442,7 +3453,7 @@ function exportReport() {
   const { rows, bh } = APP.res, by = rows.filter(r => r.nT).sort((a, b) => b.sharpe - a.sharpe);
   const L = [`# 量化策略回測報告`, ``, `- 標的：${APP.name}（${APP.sym}）`, `- 期間：${dsp(APP.ctx.dates[0])} ~ ${dsp(APP.ctx.dates[APP.ctx.n - 1])}（${APP.ctx.n} 根日線）`,
     `- 市場：${MK.label}（基準 ${benchLabel()}）`, `- 資料來源：${APP.source}`, `- 成交假設：訊號後次根開盤｜手續費 ${CFG.fee}%、${MK.taxLabel.replace(' %（賣出）','')} ${CFG.tax}%、滑價 ${CFG.slip}%｜100% 權益、只做多`,
-    `- 策略來源：github.com/Alorse/pinescript-strategies（MPL-2.0）`, ``,
+    `- 策略來源：github.com/Alorse/pinescript-strategies（該 repo 無 LICENSE 檔；43 個 .pine 中 9 個標示 MPL-2.0、34 個未標示授權）`, ``,
     `## 基準`, `買進持有：總報酬 ${pc(bh.tot)}、年化 ${pc(bh.ann)}、夏普 ${nf(bh.sharpe)}、最大回撤 ${pc(bh.mdd)}、年化波動 ${pu(bh.vol)}、Beta ${nf(bh.beta)}`, ``,
     `## 排行（依夏普）`, ``, `| 策略 | 類別 | 總報酬 | 年化 | 夏普 | 卡瑪 | 最大回撤 | 勝率 | 交易數 | 樣本外夏普 |`, `|---|---|---|---|---|---|---|---|---|---|`,
     ...by.map(r => `| ${r.name} | ${r.cat} | ${pc(r.tot)} | ${pc(r.ann)} | ${nf(r.sharpe)} | ${nf(r.calmar)} | ${pc(r.mdd)} | ${isNA(r.win) ? '—' : (r.win * 100).toFixed(0) + '%'} | ${r.nT} | ${nf(r.oos)} |`),
@@ -3681,7 +3692,7 @@ function buildReport() {
   ③ 本平台只做多，空頭期間的表現無法從這裡得知。<br>
   ④ ${MK.key === 'TW' ? '台股資料已還原除權息與面額變更，但<b>減資未處理</b>；處置股僅能以零成交量代理偵測。' : '美股以美元計價，未換算匯率，也未計入匯兌成本。'}<br>
   ⑤ 回測不含流動性衝擊成本；小型股與冷門股的結果參考價值低。</div>
-  <div class="foot">量化策略實驗室 v8　｜　策略來源 github.com/Alorse/pinescript-strategies（MPL-2.0）　｜　資料來源 FinMind</div>`;
+  <div class="foot">量化策略實驗室　｜　策略來源 github.com/Alorse/pinescript-strategies（授權狀態不一，詳見策略庫分頁）　｜　資料來源 FinMind（僅供教育與非商業用途）</div>`;
   return h;
 }
 function printReport() {
@@ -3801,7 +3812,7 @@ async function makePptx() {
         : '④ 美股以美元計價，未換算匯率，也未計入匯兌成本。\n', options: { fontSize: 12 } },
       { text: '⑤ 回測不含流動性衝擊成本；小型股與冷門股的結果參考價值低。', options: { fontSize: 12 } }
     ], { x: 0.5, y: 1.2, w: 9, h: 3.4, color: INK, lineSpacing: 20 });
-    sl.addText('量化策略實驗室　｜　策略來源 github.com/Alorse/pinescript-strategies（MPL-2.0）　｜　資料來源 FinMind',
+    sl.addText('量化策略實驗室　｜　策略來源 github.com/Alorse/pinescript-strategies（授權狀態不一）　｜　資料來源 FinMind（僅供教育與非商業用途）',
       { x: 0.5, y: 4.9, w: 9, h: 0.3, fontSize: 9, color: GREY });
 
     const blob = await p.write({ outputType: 'blob' });
