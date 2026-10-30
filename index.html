@@ -1381,6 +1381,11 @@ function runAll(ctx) {
 const $ = s => document.querySelector(s);
 const el = (t, a = {}, h = '') => { const e = document.createElement(t); Object.assign(e, a); if (h) e.innerHTML = h; return e; };
 const esc = s => String(s).replace(/[&<>"]/g, m => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[m]));
+/* CSV 欄位跳脫：含逗號／引號／換行就加引號，內部引號成對。
+   策略名如「KD 黃金交叉（台股 9,3,3）」本身含逗號，不跳脫會把欄位切錯。 */
+const csvCell = v => { const t = (v === null || v === undefined) ? '' : String(v);
+  return /[",\n\r]/.test(t) ? '"' + t.replace(/"/g, '""') + '"' : t; };
+const csvRow = a => a.map(csvCell).join(',');
 const pc = (v, d = 1) => isNA(v) ? '—' : (v >= 0 ? '+' : '') + (v * 100).toFixed(d) + '%';
 const pu = (v, d = 1) => isNA(v) ? '—' : (v * 100).toFixed(d) + '%';
 const nf = (v, d = 2) => isNA(v) ? '—' : (v === Infinity ? '∞' : v.toFixed(d));
@@ -2534,10 +2539,11 @@ async function runSignals() {
       <div class="bar" style="max-width:320px;margin:14px auto 0"><i style="width:${(i / syms.length * 100).toFixed(0)}%"></i></div></div>`;
     await yieldNow();
     try {
-      const [bars, exRaw, divs] = await Promise.all([
+      const [bars, exRaw, divs, coName] = await Promise.all([
         fetchBars(syms[i], yrs),
         MK.key === 'TW' ? fetchExtras(syms[i], yrs).catch(() => null) : Promise.resolve(null),
-        (MK.key === 'TW' && CFG.adj) ? fetchAdjEvents(syms[i], yrs).catch(() => []) : Promise.resolve([])
+        (MK.key === 'TW' && CFG.adj) ? fetchAdjEvents(syms[i], yrs).catch(() => []) : Promise.resolve([]),
+        fetchName(syms[i]).catch(() => '')      // 與行情同時抓，不另外多一輪往返
       ]);
       if (!bars || bars.length < 60) { out.push({ sym: syms[i], err: '資料不足' }); continue; }
       const adjBars = (MK.key === 'TW' && CFG.adj) ? applyAdjTW(bars, divs).bars : bars;
@@ -2549,11 +2555,10 @@ async function runSignals() {
       SIG.asOf = dates[n - 1];
       R.rows.forEach(r => {
         const sn = r.signalNow; if (!sn) return;
-        out.push({ sym: syms[i], name: NAMES[MK.key + ':' + syms[i]] || '', close: last, chg: prev ? last / prev - 1 : NA,
+        out.push({ sym: syms[i], name: (coName && coName !== syms[i]) ? coName : '', close: last, chg: prev ? last / prev - 1 : NA,
           strat: r.name, cat: r.cat, action: sn.blockedNow && sn.action === '空手' ? '被濾網擋下' : sn.action,
           bars: sn.bars, unreal: sn.unreal, sharpe: r.sharpe, oos: r.oos, nT: r.nT });
       });
-      fetchName(syms[i]).catch(() => '');
     } catch (e) { out.push({ sym: syms[i], err: '載入失敗：' + (e.message || e) }); }
   }
   SIG.rows = out; SIG.running = false; renderSignals();
@@ -2658,9 +2663,9 @@ function renderSignals() {
   wireSymCount('sigSyms', 'sigCount', SIG_MAX, 'sigRun');
   if ($('#sigCsv')) $('#sigCsv').onclick = () => {
     const head = ['動作', '標的', '名稱', '收盤', '漲跌%', '策略', '類別', '持有根數', '未實現%', '策略夏普', '交易數'];
-    const csv = '\ufeff' + [`# ${MK.label} 今日訊號 資料截至 ${SIG.asOf}`, head.join(','),
-      ...SIG.rows.filter(r => !r.err).map(r => [r.action, r.sym, r.name, r.close, isNA(r.chg) ? '' : (r.chg * 100).toFixed(2),
-        r.strat, r.cat, r.bars || '', isNA(r.unreal) ? '' : (r.unreal * 100).toFixed(2), nf(r.sharpe), r.nT].join(','))].join('\n');
+    const csv = '\ufeff' + [`# ${MK.label} 今日訊號 資料截至 ${SIG.asOf}`, csvRow(head),
+      ...SIG.rows.filter(r => !r.err).map(r => csvRow([r.action, r.sym, r.name, r.close, isNA(r.chg) ? '' : (r.chg * 100).toFixed(2),
+        r.strat, r.cat, r.bars || '', isNA(r.unreal) ? '' : (r.unreal * 100).toFixed(2), nf(r.sharpe), r.nT]))].join('\n');
     dl(csv, `signals_${MK.key}_${SIG.asOf}.csv`, 'text/csv');
   };
   P2.querySelectorAll('.chip[data-f]').forEach(c => c.onclick = () => { SIG.filter = c.dataset.f; renderSignals(); });
@@ -3253,6 +3258,17 @@ function runSelfTest() {
     t('自選股', '檢測後使用者清單未受影響', loadWatch('TW'), bk.TW || '');
   })();
 
+  /* ── CSV 跳脫 ── */
+  t('CSV', '一般值不加引號', csvCell('2330'), '2330');
+  t('CSV', '含逗號的策略名要加引號',
+    csvCell('KD 黃金交叉（台股 9,3,3）'), '"KD 黃金交叉（台股 9,3,3）"');
+  t('CSV', '內部引號成對', csvCell('A"B'), '"A""B"');
+  t('CSV', '含換行要加引號', csvCell('A\nB'), '"A\nB"');
+  t('CSV', 'null / undefined 變空字串', csvCell(null) + csvCell(undefined), '');
+  t('CSV', '整列含逗號欄位仍可正確切回 3 欄',
+    csvRow(['買進', 'KD 黃金交叉（台股 9,3,3）', '1.5']),
+    '買進,"KD 黃金交叉（台股 9,3,3）",1.5');
+
   /* ── 訊號品質判定 ── */
   t('訊號品質', '交易數 < 5 會被標記',
     sigFlaws({ nT: 1, sharpe: 2, oos: 1 })[0], '僅 1 筆交易');
@@ -3418,7 +3434,7 @@ function exportCSV() {
     isNA(r.avgMAE) ? '' : (r.avgMAE * 100).toFixed(2), isNA(r.worstMAE) ? '' : (r.worstMAE * 100).toFixed(2),
     isNA(r.avgMFE) ? '' : (r.avgMFE * 100).toFixed(2), r.ddLen ?? '', r.voided ?? '', r.deferred ?? ''];
   const csv = '﻿' + [`# ${MK.label} ${APP.name}(${APP.sym}) ${dsp(APP.ctx.dates[0])}~${dsp(APP.ctx.dates[APP.ctx.n - 1])} ${APP.ctx.n}根 手續費${CFG.fee}% 稅費${CFG.tax}% 滑價${CFG.slip}% 基準${CFG.bench}`,
-    head.join(','), line(bh).join(','), ...rows.map(r => line(r).join(','))].join('\n');
+    csvRow(head), csvRow(line(bh)), ...rows.map(r => csvRow(line(r)))].join('\n');
   dl(csv, `strategy_rank_${APP.sym}_${APP.ctx.dates[APP.ctx.n - 1]}.csv`, 'text/csv');
 }
 function exportReport() {
