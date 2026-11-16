@@ -116,6 +116,21 @@ h1,h2,h3{margin:0;font-weight:650;letter-spacing:-.01em}
 .kpi .v.sm{font-size:21px;font-family:inherit;letter-spacing:0;line-height:1.3;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
 .kpi .f{font-size:11.5px;color:var(--dim);line-height:1.5;margin-top:auto;overflow:hidden;text-overflow:ellipsis;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical}
 
+/* 選股檢核 */
+.aud{display:flex;gap:12px;align-items:flex-start;padding:13px 15px;border:1px solid var(--line);
+  border-radius:12px;background:var(--ov0);margin-bottom:9px}
+.aud .mark{flex:none;width:26px;height:26px;border-radius:50%;display:grid;place-items:center;font-size:14px;font-weight:700}
+.aud.ok .mark{background:rgba(31,199,125,.16);color:var(--up)}
+.aud.no .mark{background:rgba(255,95,86,.16);color:var(--dn)}
+.aud.skip{opacity:.5}
+.aud.skip .mark{background:var(--ov2);color:var(--mut)}
+.aud h4{margin:0 0 3px;font-size:13.5px;color:var(--tx)}
+.aud .d{font-size:12.5px;color:var(--mut);line-height:1.65}
+.verdict{border-radius:14px;padding:17px 19px;margin-bottom:16px;border:1px solid var(--line2)}
+.verdict.bh{background:linear-gradient(135deg,rgba(242,181,68,.13),rgba(242,181,68,.05));border-color:rgba(242,181,68,.4)}
+.verdict.win{background:linear-gradient(135deg,rgba(45,212,191,.14),rgba(45,212,191,.05));border-color:rgba(45,212,191,.45)}
+.verdict h3{margin:0 0 7px;font-size:19px}
+.verdict .why{font-size:13px;color:var(--mut);line-height:1.75}
 .sigrow{cursor:pointer}
 .sigrow:hover td{background:var(--ov2)}
 .lowq td{opacity:.42}
@@ -387,7 +402,8 @@ svg{display:block;max-width:100%}
   <div class="kpidots" id="kpidots" aria-hidden="true"></div>
 
   <div class="tabwrap" id="tabwrap"><div class="tabs" id="tabs">
-    <div class="tab on" data-p="rank">🏆 策略排行</div>
+    <div class="tab on" data-p="audit">✅ 選股檢核</div>
+    <div class="tab" data-p="rank">🏆 策略排行</div>
     <div class="tab" data-p="detail">🔬 策略詳情</div>
     <div class="tab" data-p="opt">🎛 參數最佳化</div>
     <div class="tab" data-p="mc">🎲 穩健性檢驗</div>
@@ -399,7 +415,8 @@ svg{display:block;max-width:100%}
     <div class="tab" data-p="lib">📚 策略庫</div>
   </div></div>
 
-  <div class="pane on" id="p-rank"></div>
+  <div class="pane on" id="p-audit"></div>
+  <div class="pane" id="p-rank"></div>
   <div class="pane" id="p-detail"></div>
   <div class="pane" id="p-opt"></div>
   <div class="pane" id="p-mc"></div>
@@ -3425,7 +3442,14 @@ function runSelfTest() {
   CFG.tick = 0;
   // 交易單位
   CFG.lotMode = 'share'; t('交易規則', '整張＋零股取整股', roundQty(1790.52), 1790);
-  CFG.lotMode = 'lot';   t('交易規則', '只買整張（1000 股為單位）', roundQty(1790.52), 1000);
+  // roundQty 的「整張」單位是市場相依的（台股 1000 股、美股 1 股），
+  // 原本寫死 1000 會讓這項檢測在美股模式下必定失敗。改成兩個市場都明確驗證。
+  CFG.lotMode = 'lot';
+  const _mkBak = MK;
+  MK = MARKETS.TW; t('交易規則', '台股只買整張＝1000 股為單位', roundQty(1790.52), 1000);
+  MK = MARKETS.US; t('交易規則', '美股只買整股＝1 股為單位', roundQty(1790.52), 1790);
+  MK = _mkBak;
+  t('交易規則', '檢測後市場已還原', MK.key, _mkBak.key);
   CFG.lotMode = 'frac';  t('交易規則', '分數股不取整', roundQty(1790.52), 1790.52);
   // 最低手續費
   CFG.fee = 0.1425; CFG.feeMin = 20;
@@ -4443,7 +4467,203 @@ function showCfg() {
 }
 
 /* ---------- 分頁 ---------- */
-const RENDER = { rank: renderRank, detail: renderDetail, opt: renderOpt, mc: renderMC, sig: renderSignals, port: renderPort, custom: renderCustom, batch: renderBatch, risk: renderRisk, lib: renderLib };
+/* =========================================================================
+   選股檢核：把「排行榜只是候選池」那套流程做成一鍵
+   順序刻意設計成兩個硬性停損點（第 0 步、第 3 步），大多數標的會在那裡結束。
+   ========================================================================= */
+let AUDIT = { running: false, res: null, msg: '' };
+const AUD_MIN_TRADES = 2;        // 已結算交易數門檻：低於此的「年化」只是未平倉帳面
+const AUD_Q = 0.05;              // BH 校正後的 q 值門檻
+const AUD_SMALL = 20;            // 低於此筆數視為小樣本，要跑重抽樣
+const AUD_ITERS = 5000;          // 隨機排列次數。1000 次時 q 值會在 0.05 門檻兩側跳動
+                                 // （實測同一標的兩次跑出 q=0.029 與 q=0.145），次數要夠才穩定
+const AUD_EDGE = 2;              // q 落在門檻的幾倍以內視為「臨界」，不當成乾淨通過
+
+async function runAudit() {
+  if (AUDIT.running || !APP.res) return;
+  AUDIT.running = true; AUDIT.res = null;
+  const tick = async m => { AUDIT.msg = m; renderAudit(); await yieldNow(); };
+
+  const bh = APP.res.bh, rows = APP.res.rows, steps = [];
+  const done = (verdict, why, survivors) => {
+    AUDIT.res = {
+      sym: APP.sym, name: APP.name, n: APP.ctx.n,
+      from: APP.ctx.dates[0], to: APP.ctx.dates[APP.ctx.n - 1],
+      bh, steps, verdict, why, survivors: survivors || []
+    };
+    AUDIT.running = false; AUDIT.msg = ''; renderAudit();
+  };
+
+  /* ── 第 0 步：先跟買進持有比 ───────────────────────────── */
+  await tick('第 0 步：與買進持有比較…');
+  const real = rows.filter(r => r.nT >= AUD_MIN_TRADES && !isNA(r.sharpe));
+  const paper = rows.filter(r => r.nT < AUD_MIN_TRADES && r.nOpen > 0);
+  let cand = real.filter(r => r.sharpe > bh.sharpe);
+  steps.push({ n: 0, t: '與買進持有比較', ok: cand.length > 0,
+    d: `買進持有：年化 <b>${pc(bh.ann)}</b>、夏普 <b>${nf(bh.sharpe)}</b>、最大回撤 ${pc(bh.mdd)}。<br>`
+     + `夏普贏過買進持有的策略：<b>${cand.length}</b> 支`
+     + (cand.length ? `（${cand.slice(0, 4).map(r => esc(r.name)).join('、')}${cand.length > 4 ? '…' : ''}）` : '') });
+  if (!cand.length) return done('買進持有',
+    '沒有任何策略的風險調整後報酬贏過買進持有。這檔標的本身的走勢已經夠好，任何進出場都只是在減分。');
+
+  /* ── 第 1–2 步：資料長度與未平倉帳面排除 ───────────────── */
+  await tick('第 1–2 步：檢查資料長度與有效交易…');
+  const short = rows.filter(r => r.short);
+  steps.push({ n: 1, t: '資料長度', ok: APP.ctx.n >= 500,
+    d: `${APP.ctx.n} 根 K 線（${dsp(APP.ctx.dates[0])} ～ ${dsp(APP.ctx.dates[APP.ctx.n - 1])}）。`
+     + (APP.ctx.n < 500 ? '　<b class="up">建議拉長到 3 年以上</b>，否則長週期策略算不出來、樣本內也太薄。' : '')
+     + (short.length ? `<br>${short.length} 支因熱身期不足被標為「資料不足」：${short.slice(0, 3).map(r => esc(r.name)).join('、')}${short.length > 3 ? '…' : ''}` : '') });
+  steps.push({ n: 2, t: `排除已結算交易 < ${AUD_MIN_TRADES} 筆的`, ok: true,
+    d: paper.length
+      ? `排除 <b>${paper.length}</b> 支：${paper.map(r => `${esc(r.name)}（年化 ${pc(r.ann)}，但已結算 ${r.nT} 筆）`).join('、')}<br>`
+        + `<span class="dim">這些是「買進後一直抱著」的未平倉帳面數字，不是交易成果，本質是買進持有的變形。</span>`
+      : '沒有這類策略。' });
+
+  /* ── 第 3 步：隨機基準檢定（硬性停損點）────────────────── */
+  await tick(`第 3 步：隨機基準檢定（${AUD_ITERS} 次隨機排列，約需 10 秒）…`);
+  renderMC();                                     // 先讓 #mcIters 存在
+  const itSel = $('#mcIters');
+  if (itSel) { itSel.value = String(AUD_ITERS); }  // 次數不足會讓 q 值在門檻兩側跳動
+  await runMC();
+  const mcBy = {}; (MC.rows || []).forEach(r => mcBy[r.id] = r);
+  const notTested = cand.filter(r => !mcBy[r.id]);
+  cand = cand.filter(r => mcBy[r.id] && !isNA(mcBy[r.id].qval) && mcBy[r.id].qval <= AUD_Q);
+  const edge = cand.filter(r => mcBy[r.id].qval > AUD_Q / AUD_EDGE);   // 勉強過關的
+  steps.push({ n: 3, t: '隨機基準檢定（Benjamini-Hochberg 校正）', ok: cand.length > 0,
+    d: `${(MC.rows || []).length} 支受檢，通過 q ≤ ${AUD_Q} 的：<b>${cand.length}</b> 支。<br>`
+     + (cand.length
+        ? cand.map(r => `${esc(r.name)}：p=${mcBy[r.id].pval.toFixed(3)}、<b>q=${mcBy[r.id].qval.toFixed(3)}</b>、實際夏普 ${nf(r.sharpe)}（隨機中位數 ${nf(mcBy[r.id].mcMed)}）`).join('<br>')
+        : `最小 q 值 ${(MC.rows || []).length ? nf(Math.min(...MC.rows.filter(r => !isNA(r.qval)).map(r => r.qval))) : '—'}。<span class="dim">同時測 ${(MC.rows || []).length} 支策略時，單看 p 值會被多重比較騙——校正後才算數。</span>`)
+     + (notTested.length ? `<br><span class="dim">${notTested.length} 支因已結算交易過少未受檢。</span>` : '')
+     + (edge.length ? `<br><b class="up">⚠ ${edge.map(r => esc(r.name)).join('、')} 的 q 值貼近 ${AUD_Q} 門檻</b>`
+        + `<span class="dim">——隨機檢定本身有抽樣誤差，再跑一次可能就不過。不要把這種臨界結果當成確定的結論。</span>` : '') });
+  if (!cand.length) return done('買進持有',
+    '排行榜前段的表現，在隨機基準檢定下無法和「同樣筆數、隨機進場」區分開來。這是選擇偏誤，不是策略有效。');
+
+  /* ── 第 4 步：成本敏感度 ───────────────────────────────── */
+  await tick('第 4 步：成本敏感度（成本放大 3 倍）…');
+  runCost();
+  const costBy = {}; (COST.rows || []).forEach(r => costBy[r.id] = r);
+  const costOK = cand.filter(r => {
+    const c = costBy[r.id]; if (!c || !c.v[3]) return false;
+    return c.v[3].ann > 0 && c.v[3].sharpe > bh.sharpe;
+  });
+  steps.push({ n: 4, t: '成本敏感度（3 倍成本）', ok: costOK.length > 0,
+    d: cand.map(r => { const c = costBy[r.id];
+      if (!c || !c.v[3]) return `${esc(r.name)}：無資料`;
+      const keep = c.v[3].ann > 0 && c.v[3].sharpe > bh.sharpe;
+      return `${esc(r.name)}：1 倍 年化 ${pc(c.v[1].ann)}／夏普 ${nf(c.v[1].sharpe)} → 3 倍 年化 ${pc(c.v[3].ann)}／夏普 ${nf(c.v[3].sharpe)}　<b style="color:${keep ? 'var(--up)' : 'var(--dn)'}">${keep ? '撐住' : '失效'}</b>`;
+    }).join('<br>') });
+  if (!costOK.length) return done('買進持有', '成本放大後優勢消失，代表原本的報酬主要來自低估的交易成本。');
+  cand = costOK;
+
+  /* ── 第 5 步：Walk-Forward 與參數穩定度 ────────────────── */
+  await tick('第 5 步：Walk-Forward 與參數穩定度…');
+  const wfInfo = {};
+  for (const r of cand) {
+    const st = STRATS.find(x => x.id === r.id);
+    const pk = st ? Object.keys(st.params)[0] : null;
+    if (!pk) { wfInfo[r.id] = { na: true }; continue; }
+    OPT.id = r.id; OPT.p1 = pk; OPT.mode = 'wf';
+    runWF();
+    const R = WF.res;
+    if (!R || !R.folds) { wfInfo[r.id] = { na: true }; continue; }
+    const picks = R.folds.filter(f => !f.na).map(f => f.best);
+    const lo = Math.min(...picks), hi = Math.max(...picks);
+    wfInfo[r.id] = { param: pk, wfe: R.wfe, oosTot: R.oosTot, defTot: R.defTot,
+      bhTot: R.bhTot, picks, spread: lo ? hi / lo : Infinity, defVal: R.defVal };
+    await yieldNow();
+  }
+  steps.push({ n: 5, t: 'Walk-Forward 與參數穩定度', ok: true,
+    d: cand.map(r => { const w = wfInfo[r.id];
+      if (!w || w.na) return `${esc(r.name)}：此策略沒有可掃描的參數`;
+      const unstable = w.spread >= 2;
+      return `${esc(r.name)}（掃 <code>${esc(w.param)}</code>）：WFE <b>${nf(w.wfe)}</b>；`
+        + `走查樣本外 ${pc(w.oosTot)}、用預設參數 ${pc(w.defTot)}、買進持有 ${pc(w.bhTot)}<br>`
+        + `<span class="dim">各段最佳值 ${w.picks.join(' → ')}　`
+        + (unstable
+            ? `<b class="up">跳動 ${w.spread.toFixed(1)} 倍，最佳值是雜訊 → 不要最佳化，用預設值 ${w.defVal}</b>`
+            : `相對穩定`) + '</span>';
+    }).join('<br><br>') });
+
+  /* ── 第 6 步：小樣本的交易序列重抽樣 ───────────────────── */
+  await tick('第 6 步：交易序列重抽樣…');
+  const seqInfo = {};
+  for (const r of cand) {
+    if (r.nT >= AUD_SMALL) continue;
+    SEQ.id = r.id; SEQ.mode = 'boot'; SEQ.res = null;
+    runSeq();
+    const R = SEQ.res;
+    if (!R || R.tooFew || !R.finArr) { seqInfo[r.id] = { na: true }; continue; }
+    const a = Array.from(R.finArr).sort((x, y) => x - y);
+    seqInfo[r.id] = { p5: a[Math.floor(a.length * 0.05)], med: a[Math.floor(a.length * 0.5)],
+      loseBH: a.filter(v => v < bh.tot).length / a.length, k: R.k };
+    await yieldNow();
+  }
+  const smalls = cand.filter(r => r.nT < AUD_SMALL);
+  steps.push({ n: 6, t: `交易序列重抽樣（筆數 < ${AUD_SMALL} 才需要）`, ok: true,
+    d: smalls.length
+      ? smalls.map(r => { const q = seqInfo[r.id];
+          if (!q || q.na) return `${esc(r.name)}：筆數太少無法模擬`;
+          return `${esc(r.name)}（${q.k} 筆）：重抽樣 1000 次 → 最差 5% ${pc(q.p5)}、中位數 ${pc(q.med)}；`
+            + `<b style="color:${q.loseBH < 0.2 ? 'var(--up)' : 'var(--dn)'}">輸給買進持有的情境 ${(q.loseBH * 100).toFixed(1)}%</b>`;
+        }).join('<br>')
+      : '所有存活策略的交易筆數都夠多，不需要這一步。' });
+
+  /* ── 結論 ──────────────────────────────────────────────── */
+  const survivors = cand.map(r => ({
+    id: r.id, name: r.name, ann: r.ann, sharpe: r.sharpe, nT: r.nT, mdd: r.mdd,
+    q: mcBy[r.id].qval, wf: wfInfo[r.id], seq: seqInfo[r.id]
+  }));
+  const anyEdge = survivors.some(x => x.q > AUD_Q / AUD_EDGE);
+  done(survivors.map(x => x.name).join('、'),
+    (anyEdge ? `<b class="up">⚠ 有策略的 q 值貼近門檻，屬於臨界通過，再跑一次可能就不過。</b><br>` : '')
+    + `通過全部檢驗。但請注意：這是「${APP.sym}」在這段期間的結論，不能外推到其他標的或其他期間；`
+    + `同一支策略在別檔股票上通常不會通過。`, survivors);
+}
+
+function renderAudit() {
+  const P2 = $('#p-audit');
+  if (!APP.res) { P2.innerHTML = `<div class="card empty">先載入資料並執行回測，再執行檢核</div>`; return; }
+  const R = AUDIT.res;
+  let body;
+  if (AUDIT.running) {
+    body = `<div class="empty"><span class="spin"></span> ${esc(AUDIT.msg || '檢核中…')}
+      <div class="dim" style="margin-top:12px">完整檢核含 1000 次隨機排列、4 組成本、Walk-Forward 與重抽樣，約需 10–30 秒。</div></div>`;
+  } else if (!R) {
+    body = `<div class="empty">把「排行榜只是候選池」那套流程做成一鍵。<br>
+      依序跑完七個關卡，直接告訴你該用買進持有還是某支策略。<br><br>
+      <span class="dim">第 0 步與第 3 步是硬性停損點——大多數標的會在那裡就結束。</span></div>`;
+  } else {
+    const isBH = R.verdict === '買進持有';
+    body = `
+    <div class="verdict ${isBH ? 'bh' : 'win'}">
+      <h3>${isBH ? '📌 用買進持有' : '✅ ' + esc(R.verdict)}</h3>
+      <div class="why">${esc(R.sym)}${R.name ? '（' + esc(R.name) + '）' : ''} ·
+        ${dsp(R.from)} ～ ${dsp(R.to)} · ${R.n} 根<br>${R.why}</div>
+    </div>
+    ${R.steps.map(st => `<div class="aud ${st.ok === false ? 'no' : 'ok'}">
+      <div class="mark">${st.ok === false ? '✗' : '✓'}</div>
+      <div style="flex:1"><h4>第 ${st.n} 步　${esc(st.t)}</h4><div class="d">${st.d}</div></div>
+    </div>`).join('')}
+    ${R.survivors.length ? `<div class="warn" style="margin-top:14px">
+      <b>通過的策略要怎麼用：</b>${R.survivors.map(x =>
+        `<br>· <b>${esc(x.name)}</b>　年化 ${pc(x.ann)}、夏普 ${nf(x.sharpe)}、${x.nT} 筆、q=${nf(x.q)}`
+        + (x.wf && !x.wf.na && x.wf.spread >= 2 ? `　<b class="up">用預設參數 ${x.wf.defVal}，不要最佳化</b>` : '')
+      ).join('')}</div>` : ''}
+    <div class="warn" style="margin-top:12px;border-left-color:var(--mut)">
+      <span class="dim">本檢核只排除「明顯站不住」的結果，通過不代表未來會賺。
+      所有數字都是歷史回測，不構成投資建議。</span></div>`;
+  }
+  P2.innerHTML = `<div class="card">
+    <div class="ph"><h2>選股檢核</h2>
+      <span class="dim" style="font-size:12px">· 七個關卡 · 直接給結論</span><div class="sp"></div>
+      <button class="btn primary" id="audRun" ${AUDIT.running ? 'disabled' : ''}>▶ 執行檢核</button></div>
+    <div style="padding:0 18px 18px">${body}</div></div>`;
+  const b = $('#audRun'); if (b) b.onclick = runAudit;
+}
+
+const RENDER = { audit: renderAudit, rank: renderRank, detail: renderDetail, opt: renderOpt, mc: renderMC, sig: renderSignals, port: renderPort, custom: renderCustom, batch: renderBatch, risk: renderRisk, lib: renderLib };
 function showTab(p) {
   if (typeof playStop === 'function') playStop();
   document.querySelectorAll('.tab').forEach(t => t.classList.toggle('on', t.dataset.p === p));
