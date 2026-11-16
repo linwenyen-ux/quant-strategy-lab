@@ -3376,31 +3376,32 @@ function runSelfTest() {
   t('檢核相依', 'yieldNow 可呼叫', typeof yieldNow === 'function', true);
   t('檢核相依', 'runAudit 可呼叫', typeof runAudit === 'function', true);
 
-  /* ── 進場時機敏感度 ── */
+  /* ── 進場時機敏感度（固定持有期滾動）── */
   (function () {
     const mk = px => ({ b: { c: px, o: px, h: px, l: px, v: px.map(() => 1) },
       dates: px.map((_, i) => '2024' + String(1 + Math.floor(i / 28)).padStart(2, '0')
         + String(1 + (i % 28)).padStart(2, '0')) });
-    // 單調上升：任何一天進場都賺 → 虧損機率 0
     const up = Array.from({ length: 400 }, (_, i) => 100 + i);
     const eUp = entryRisk(mk(up), 50);
     t('進場時機', '單調上漲時虧損機率為 0', eUp.lose, 0);
-    t('進場時機', '單調上漲時最差仍為正', eUp.min > 0, true);
-    t('進場時機', '可用進場日數 = 總長 − 最低持有', eUp.days, 400 - 50);
-    // 單調下跌：任何一天進場都賠 → 虧損機率 1
+    t('進場時機', '起點數 = 總長 − 持有期', eUp.days, 400 - 50);
     const dn = Array.from({ length: 400 }, (_, i) => 500 - i);
-    const eDn = entryRisk(mk(dn), 50);
-    t('進場時機', '單調下跌時虧損機率為 1', eDn.lose, 1);
-    t('進場時機', '單調下跌時最佳仍為負', eDn.max < 0, true);
-    // 先漲後跌：第一天進場是最好的 → startPct 應為 1（沒有比它更差的在它之下…即它最大）
-    const hump = Array.from({ length: 400 }, (_, i) => i < 200 ? 100 + i : 300 - (i - 200) * 0.9);
-    const eH = entryRisk(mk(hump), 50);
-    t('進場時機', '先漲後跌時最差進場在峰頂附近', +eH.worstDate.slice(4) > 100, true);
-    t('進場時機', '平盤序列最差等於最佳',
-      (function () { const flat = new Array(300).fill(50);
-        const e = entryRisk(mk(flat), 50); return Math.abs(e.min - e.max) < 1e-9; })(), true);
-    // 用布林斷言：t() 的數值比較會把 null 當成 NA，NA 永遠不等於 NA
+    t('進場時機', '單調下跌時虧損機率為 1', entryRisk(mk(dn), 50).lose, 1);
+    const flat = new Array(300).fill(50);
+    const eF = entryRisk(mk(flat), 50);
+    t('進場時機', '平盤時報酬全為 0', eF.min === 0 && eF.max === 0, true);
     t('進場時機', '資料太短時回傳 null', entryRisk(mk([1, 2, 3]), 50) === null, true);
+    // 關鍵：不可共用終點。先漲後跌的序列，若抱到最後一根會嚴重低估虧損機率
+    const hump = Array.from({ length: 400 }, (_, i) => i < 200 ? 100 + i : 300 - (i - 200));
+    const eH = entryRisk(mk(hump), 50);
+    t('進場時機', '先漲後跌時虧損機率明顯大於 0', eH.lose > 0.3, true);
+    t('進場時機', '先漲後跌時最差為負', eH.min < 0, true);
+    // [10..15] 持有 2 根：起點 0~3，報酬 12/10、13/11、14/12、15/13 → 最小是最後一個
+    const eR = entryRisk(mk([10, 11, 12, 13, 14, 15]), 2);
+    t('進場時機', '報酬為區間報酬非年化（最小值）',
+      Math.abs(eR.min - (15 / 13 - 1)) < 1e-9, true);
+    t('進場時機', '報酬為區間報酬非年化（最大值）',
+      Math.abs(eR.max - (12 / 10 - 1)) < 1e-9, true);
   })();
 
   /* ── 訊號品質判定 ── */
@@ -4518,28 +4519,27 @@ function showCfg() {
    ========================================================================= */
 let AUDIT = { running: false, res: null, msg: '' };
 
-/* 進場時機敏感度。
-   回測的「買進持有」只買在視窗的第一根收盤（buyHold 用 c[0]），
-   但那是一個任意決定的日期。這裡把所有可能的進場日都算一遍，
-   看結論有多依賴「剛好買在起點」。 */
-function entryRisk(ctx, minHold) {
-  const c = ctx.b.c, n = c.length, last = c[n - 1], H = minHold || TD;
-  const anns = []; let worst = { a: Infinity, i: 0 };
+/* 進場時機敏感度：固定持有期、滾動所有起點。
+   ⚠ 刻意不用「抱到最後一根」——那會讓每條路徑共用同一個終點，
+   終點剛好在高位時所有進場日看起來都賺（共同終點偏誤）。
+   實測 TSM 用共同終點算出「虧損機率 0%」，改成固定持有 1 年後是 12.9%。 */
+function entryRisk(ctx, holdBars) {
+  const c = ctx.b.c, n = c.length, H = Math.max(2, holdBars || TD);
+  const rets = []; let worst = { r: Infinity, i: 0 };
   for (let i = 0; i + H < n; i++) {
-    const yrs = (n - 1 - i) / TD;
-    const a = Math.pow(last / c[i], 1 / yrs) - 1;
-    anns.push(a);
-    if (a < worst.a) worst = { a, i };
+    const r = c[i + H] / c[i] - 1;
+    rets.push(r);
+    if (r < worst.r) worst = { r, i };
   }
-  if (!anns.length) return null;
-  const srt = anns.slice().sort((x, y) => x - y);
+  if (!rets.length) return null;
+  const srt = rets.slice().sort((x, y) => x - y);
   const q = f => srt[Math.min(srt.length - 1, Math.floor(srt.length * f))];
-  const atStart = anns[0];
   return {
-    days: anns.length, min: srt[0], p10: q(0.10), p25: q(0.25), med: q(0.50),
-    max: srt[srt.length - 1], lose: anns.filter(v => v < 0).length / anns.length,
-    worstDate: ctx.dates[worst.i], worstPx: c[worst.i], lastPx: last,
-    atStart, startPct: anns.filter(v => v < atStart).length / anns.length
+    days: rets.length, holdBars: H,
+    min: srt[0], p10: q(0.10), p25: q(0.25), med: q(0.50),
+    max: srt[srt.length - 1], lose: rets.filter(v => v < 0).length / rets.length,
+    worstDate: ctx.dates[worst.i], worstPx: c[worst.i],
+    worstEnd: ctx.dates[worst.i + H], worstEndPx: c[worst.i + H]
   };
 }
 const AUD_MIN_TRADES = 2;        // 已結算交易數門檻：低於此的「年化」只是未平倉帳面
@@ -4580,19 +4580,18 @@ async function runAudit() {
   AUDIT.er = er;
   const risky = er && er.lose >= AUD_LOSE;
   steps.push({ n: 1, t: '買進持有的進場時機風險', ok: !risky,
-    d: !er ? '資料長度不足以評估進場時機。'
-      : `在這段期間的 <b>${er.days}</b> 個可能進場日中（每個至少持有 1 年）：<br>`
+    d: !er ? '資料長度不足以評估進場時機（需要超過 1 年）。'
+      : `任選一天買進、<b>固定持有 1 年</b>，共 <b>${er.days}</b> 個起點：<br>`
       + `最差 <b style="color:${er.min < 0 ? 'var(--dn)' : 'var(--up)'}">${pc(er.min)}</b>`
-      + `（${dsp(er.worstDate)}，${MK.cur}${nf(er.worstPx)} → ${MK.cur}${nf(er.lastPx)}）`
+      + `（${dsp(er.worstDate)} ${MK.cur}${nf(er.worstPx)} → ${dsp(er.worstEnd)} ${MK.cur}${nf(er.worstEndPx)}）`
       + `　p10 ${pc(er.p10)}　中位數 <b>${pc(er.med)}</b>　最佳 ${pc(er.max)}<br>`
-      + `<b style="color:${risky ? 'var(--dn)' : 'var(--up)'}">進場後虧損的機率：${(er.lose * 100).toFixed(1)}%</b><br>`
+      + `<b style="color:${risky ? 'var(--dn)' : 'var(--up)'}">一年後虧損的機率：${(er.lose * 100).toFixed(1)}%</b><br>`
       + (risky
-          ? `<b class="up">⚠ 回測顯示的 ${pc(er.atStart)} 是「剛好買在視窗第一天」的結果，`
-            + `在全部進場日裡位居第 ${(er.startPct * 100).toFixed(0)} 百分位。`
-            + `換個日子進場，結果會完全不同。</b><br>`
-            + `<span class="dim">「用買進持有」的意思是「這 ${rows.length} 支擇時策略都贏不過持續持有」，`
-            + `不是「現在是好的進場點」——這兩件事無關。</span>`
-          : `<span class="dim">任何一天進場的結果都相近，結論不依賴進場時點的運氣。</span>`) });
+          ? `<b class="up">⚠ 進場時點對結果影響很大，買在不對的日子一年後有 ${(er.lose * 100).toFixed(0)}% 機率是賠的。</b><br>`
+          : `<span class="dim">多數起點一年後為正，但仍有 ${(er.lose * 100).toFixed(1)}% 的起點會虧損。</span><br>`)
+      + `<span class="dim">「用買進持有」的意思是「這 ${rows.length} 支擇時策略都贏不過持續持有」，`
+      + `不是「現在可以買」也不是「抱久一定賺」——這三件事互不相干。`
+      + `此處採固定持有期滾動，避免所有路徑共用同一個終點而高估勝率。</span>` });
 
   if (!cand.length) return done('買進持有',
     '沒有任何策略的風險調整後報酬贏過買進持有。這檔標的本身的走勢已經夠好，任何進出場都只是在減分。'
