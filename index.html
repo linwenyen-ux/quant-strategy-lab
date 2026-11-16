@@ -2038,7 +2038,7 @@ function runCost() {
       medSh: shs.length ? shs[Math.floor(shs.length / 2)] : NA,
       best: best ? best.name : '—', bestSh: best ? best.sharpe : NA
     });
-    R.rows.forEach(r => { (per[r.id] = per[r.id] || { name: r.name, cat: r.cat, nT: r.nT, v: {} }).v[m] = { sharpe: r.sharpe, ann: r.ann }; });
+    R.rows.forEach(r => { (per[r.id] = per[r.id] || { id: r.id, name: r.name, cat: r.cat, nT: r.nT, v: {} }).v[m] = { sharpe: r.sharpe, ann: r.ann }; });
   }
   CFG.fee = base.fee; CFG.tax = base.tax; CFG.slip = base.slip;
   COST.rows = Object.values(per).filter(x => x.nT > 0);
@@ -3287,6 +3287,13 @@ function runSelfTest() {
   t('回測引擎', '訊號後次根成交（進場價）', r1.trades[0].p0, 101, 1e-9);
   t('回測引擎', '期末未平倉標記', r1.trades[0].openPos, true);
 
+  /* ── 結果列的欄位契約（跨表查詢靠這些欄位，缺了會靜默查不到）── */
+  const _m = metrics(r1, tctx, []);
+  t('欄位契約', 'metrics 產出含 id', 'id' in _m, true);
+  t('欄位契約', 'metrics 產出含 name', 'name' in _m, true);
+  t('欄位契約', 'metrics 產出含 short 旗標', 'short' in _m, true);
+  t('欄位契約', 'metrics 的 id 等於策略 id', _m.id, '__t');
+
   /* ── 代號解析（防止無聲截斷）── */
   const ps1 = parseSyms('2330,2454,2317', 20, false);
   t('代號解析', '逗號分隔', ps1.syms, ['2330', '2454', '2317']);
@@ -3357,6 +3364,17 @@ function runSelfTest() {
   t('CSV', '整列含逗號欄位仍可正確切回 3 欄',
     csvRow(['買進', 'KD 黃金交叉（台股 9,3,3）', '1.5']),
     '買進,"KD 黃金交叉（台股 9,3,3）",1.5');
+
+  /* ── 選股檢核依賴的函式是否都存在（打錯名字只有跑到該步才會爆）── */
+  // 注意：const/let 宣告的不會掛在 window 上，只有 function 宣告會，所以要直接檢查識別字
+  t('檢核相依', 'runMC 可呼叫', typeof runMC === 'function', true);
+  t('檢核相依', 'runCost 可呼叫', typeof runCost === 'function', true);
+  t('檢核相依', 'runWF 可呼叫', typeof runWF === 'function', true);
+  t('檢核相依', 'seqRun 可呼叫（不是 runSeq）', typeof seqRun === 'function', true);
+  t('檢核相依', 'renderMC 可呼叫', typeof renderMC === 'function', true);
+  t('檢核相依', 'renderOpt 可呼叫', typeof renderOpt === 'function', true);
+  t('檢核相依', 'yieldNow 可呼叫', typeof yieldNow === 'function', true);
+  t('檢核相依', 'runAudit 可呼叫', typeof runAudit === 'function', true);
 
   /* ── 訊號品質判定 ── */
   t('訊號品質', '交易數 < 5 會被標記',
@@ -4543,13 +4561,15 @@ async function runAudit() {
   /* ── 第 4 步：成本敏感度 ───────────────────────────────── */
   await tick('第 4 步：成本敏感度（成本放大 3 倍）…');
   runCost();
-  const costBy = {}; (COST.rows || []).forEach(r => costBy[r.id] = r);
+  const costBy = {};                           // 以 id 為主、名稱為備（舊版 COST.rows 沒有 id）
+  (COST.rows || []).forEach(r => { if (r.id) costBy[r.id] = r; costBy['n:' + r.name] = r; });
+  const costOf = r => costBy[r.id] || costBy['n:' + r.name];
   const costOK = cand.filter(r => {
-    const c = costBy[r.id]; if (!c || !c.v[3]) return false;
+    const c = costOf(r); if (!c || !c.v[3]) return false;
     return c.v[3].ann > 0 && c.v[3].sharpe > bh.sharpe;
   });
   steps.push({ n: 4, t: '成本敏感度（3 倍成本）', ok: costOK.length > 0,
-    d: cand.map(r => { const c = costBy[r.id];
+    d: cand.map(r => { const c = costOf(r);
       if (!c || !c.v[3]) return `${esc(r.name)}：無資料`;
       const keep = c.v[3].ann > 0 && c.v[3].sharpe > bh.sharpe;
       return `${esc(r.name)}：1 倍 年化 ${pc(c.v[1].ann)}／夏普 ${nf(c.v[1].sharpe)} → 3 倍 年化 ${pc(c.v[3].ann)}／夏普 ${nf(c.v[3].sharpe)}　<b style="color:${keep ? 'var(--up)' : 'var(--dn)'}">${keep ? '撐住' : '失效'}</b>`;
@@ -4592,7 +4612,7 @@ async function runAudit() {
   for (const r of cand) {
     if (r.nT >= AUD_SMALL) continue;
     SEQ.id = r.id; SEQ.mode = 'boot'; SEQ.res = null;
-    runSeq();
+    seqRun();                                 // 函式名是 seqRun，不是 runSeq
     const R = SEQ.res;
     if (!R || R.tooFew || !R.finArr) { seqInfo[r.id] = { na: true }; continue; }
     const a = Array.from(R.finArr).sort((x, y) => x - y);
@@ -4613,11 +4633,17 @@ async function runAudit() {
   /* ── 結論 ──────────────────────────────────────────────── */
   const survivors = cand.map(r => ({
     id: r.id, name: r.name, ann: r.ann, sharpe: r.sharpe, nT: r.nT, mdd: r.mdd,
+    hold: r.hold, lagsBH: r.ann < bh.ann,
     q: mcBy[r.id].qval, wf: wfInfo[r.id], seq: seqInfo[r.id]
   }));
   const anyEdge = survivors.some(x => x.q > AUD_Q / AUD_EDGE);
+  const lag = survivors.filter(x => x.lagsBH);
   done(survivors.map(x => x.name).join('、'),
     (anyEdge ? `<b class="up">⚠ 有策略的 q 值貼近門檻，屬於臨界通過，再跑一次可能就不過。</b><br>` : '')
+    + (lag.length ? `<b class="up">⚠ ${lag.map(x => esc(x.name)).join('、')} 的「風險調整後」雖然較佳，`
+        + `但絕對年化 ${lag.map(x => pc(x.ann)).join('、')} <b>低於買進持有的 ${pc(bh.ann)}</b>`
+        + `（持倉時間僅 ${lag.map(x => (x.hold * 100).toFixed(0) + '%').join('、')}）。`
+        + `夏普高是因為大部分時間空手、波動小，不代表賺得比較多——除非你打算把閒置資金用在別處。</b><br>` : '')
     + `通過全部檢驗。但請注意：這是「${APP.sym}」在這段期間的結論，不能外推到其他標的或其他期間；`
     + `同一支策略在別檔股票上通常不會通過。`, survivors);
 }
@@ -4648,7 +4674,8 @@ function renderAudit() {
     </div>`).join('')}
     ${R.survivors.length ? `<div class="warn" style="margin-top:14px">
       <b>通過的策略要怎麼用：</b>${R.survivors.map(x =>
-        `<br>· <b>${esc(x.name)}</b>　年化 ${pc(x.ann)}、夏普 ${nf(x.sharpe)}、${x.nT} 筆、q=${nf(x.q)}`
+        `<br>· <b>${esc(x.name)}</b>　年化 ${pc(x.ann)}、夏普 ${nf(x.sharpe)}、持倉 ${(x.hold * 100).toFixed(0)}%、${x.nT} 筆、q=${nf(x.q)}`
+        + (x.lagsBH ? `　<b class="up">（絕對報酬低於買進持有）</b>` : '')
         + (x.wf && !x.wf.na && x.wf.spread >= 2 ? `　<b class="up">用預設參數 ${x.wf.defVal}，不要最佳化</b>` : '')
       ).join('')}</div>` : ''}
     <div class="warn" style="margin-top:12px;border-left-color:var(--mut)">
